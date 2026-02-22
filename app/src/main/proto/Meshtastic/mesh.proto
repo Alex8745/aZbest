@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package meshtastic;
+
+option java_package = "com.meshtastic.proto";
+option java_outer_classname = "MeshProtos";
+option optimize_for = LITE_RUNTIME;
+
+// Simplified Meshtastic protocol for text chat
+// No nanopb, no external dependencies
+
+message MeshPacket {
+  uint32 from = 1;
+  uint32 to = 2;
+  uint32 channel = 3;
+
+  oneof payload_variant {
+    Data decoded = 4;
+    bytes encrypted = 5;
+  }
+
+  uint32 id = 6;
+  uint32 rx_time = 7;
+  float rx_snr = 8;
+  int32 rx_rssi = 9;
+  uint32 hop_limit = 10;
+  bool want_ack = 11;
+  Priority priority = 12;
+}
+
+message Data {
+  PortNum portnum = 1;
+  bytes payload = 2;
+  bool want_response = 3;
+  uint32 dest = 4;
+  uint32 source = 5;
+  uint32 request_id = 6;
+  uint32 reply_id = 7;
+}
+
+enum PortNum {
+  UNKNOWN_APP = 0;
+  TEXT_MESSAGE_APP = 1;
+  REMOTE_HARDWARE_APP = 2;
+  POSITION_APP = 3;
+  NODEINFO_APP = 4;
+  ROUTING_APP = 5;
+  ADMIN_APP = 6;
+  TEXT_MESSAGE_COMPRESSED_APP = 7;
+  WAYPOINT_APP = 8;
+  AUDIO_APP = 9;
+  DETECTION_SENSOR_APP = 10;
+  REPLY_APP = 32;
+  IP_TUNNEL_APP = 33;
+  PAXCOUNTER_APP = 34;
+  SERIAL_APP = 64;
+  STORE_FORWARD_APP = 65;
+  RANGE_TEST_APP = 66;
+  TELEMETRY_APP = 67;
+  ZPS_APP = 68;
+  SIMULATOR_APP = 69;
+  TRACEROUTE_APP = 70;
+  NEIGHBORINFO_APP = 71;
+  ATAK_PLUGIN = 72;
+  PRIVATE_APP = 256;
+  ATAK_FORWARDER = 257;
+  MAX_APP = 511;
+}
+
+enum Priority {
+  UNSET = 0;
+  MIN = 1;
+  BACKGROUND = 10;
+  DEFAULT = 64;
+  RELIABLE = 70;
+  ACK = 120;
+  MAX = 127;
+}
+
+message User {
+  string id = 1;
+  string long_name = 2;
+  string short_name = 3;
+  bytes macaddr = 4;
+}
+
+message Position {
+  int32 latitude_i = 1;
+  int32 longitude_i = 2;
+  int32 altitude = 3;
+  uint32 time = 4;
+}
+
+message NodeInfo {
+  uint32 num = 1;
+  User user = 2;
+  Position position = 3;
+  float snr = 4;
+}
