@@ -28,17 +28,27 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * Транспортный слой: управляет BLE-соединением с Meshtastic-устройством.
+ *
+ * Поток работы:
+ *  1. [startScan] — найти ESP-устройства поблизости
+ *  2. [connect]   — подключиться к выбранному
+ *  3. После подключения автоматически отправляется want_config handshake
+ *  4. [myNodeNum] обновляется когда ESP присылает my_info
+ *  5. [sendMessage] — отправить текстовое сообщение
+ *  6. Входящие сообщения приходят в [incomingMessages]
+ */
 class MeshtasticTransport(private val context: Context) {
 
     companion object {
         private const val TAG = "MeshtasticTransport"
-        private const val MY_NODE_ID = 0x12345678 // Placeholder
-        private const val SCAN_TIMEOUT_MS = 12_000L
-        private const val CONNECT_TIMEOUT_MS = 10_000L
-        private const val CONNECT_RETRIES = 2
+        private const val SCAN_TIMEOUT_MS      = 12_000L
+        private const val CONNECT_TIMEOUT_MS   = 10_000L
+        private const val CONNECT_RETRIES      = 2
         private const val CONNECT_RETRY_DELAY_MS = 150
         private const val MAX_RECONNECT_ATTEMPTS = 5
-        private const val RECONNECT_DELAY_MS = 2_000L
+        private const val RECONNECT_DELAY_MS   = 2_000L
     }
 
     private val bluetoothManager =
@@ -47,15 +57,26 @@ class MeshtasticTransport(private val context: Context) {
         get() = bluetoothManager?.adapter
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private var bleClient: MeshtasticBleClient? = null
     private var incomingJob: Job? = null
     private var connectionMonitorJob: Job? = null
     private var scanTimeoutJob: Job? = null
     private var reconnectJob: Job? = null
+    private var nodeIdObserveJob: Job? = null
 
     private var shouldAutoReconnect = false
     private var lastConnectedAddress: String? = null
     private var reconnectAttempt = 0
+
+    /**
+     * Node ID нашего устройства.
+     * 0 пока не завершён handshake с ESP (until my_info получен).
+     * Используется как поле "from" во всех исходящих пакетах.
+     */
+    private var myNodeNum: Int = 0
+
+    // ── Публичные StateFlow ────────────────────────────────────────────────────
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -66,13 +87,15 @@ class MeshtasticTransport(private val context: Context) {
     private val _incomingMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val incomingMessages: StateFlow<List<ChatMessage>> = _incomingMessages.asStateFlow()
 
+    // ── Сканирование ──────────────────────────────────────────────────────────
+
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             try {
                 val device = result.device ?: return
                 val address = device.address ?: return
                 if (address.isBlank()) return
-                if (!isLikelyEspMeshtastic(device, result)) return
+                if (!isLikelyMeshtastic(device, result)) return
 
                 upsertDevice(
                     MeshtasticDevice(
@@ -81,15 +104,15 @@ class MeshtasticTransport(private val context: Context) {
                         rssi = result.rssi
                     )
                 )
-            } catch (securityException: SecurityException) {
-                Log.e(TAG, "No permission to read scanned device", securityException)
-            } catch (throwable: Throwable) {
-                Log.e(TAG, "Unexpected scan callback error", throwable)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Permission error in scan callback", e)
+            } catch (e: Throwable) {
+                Log.e(TAG, "Unexpected scan callback error", e)
             }
         }
 
         override fun onScanFailed(errorCode: Int) {
-            Log.e(TAG, "Scan failed with error: $errorCode")
+            Log.e(TAG, "BLE scan failed, error=$errorCode")
             _connectionState.value = ConnectionState.Error("Scan failed: $errorCode")
         }
     }
@@ -99,20 +122,15 @@ class MeshtasticTransport(private val context: Context) {
             _connectionState.value = ConnectionState.Error("Нет разрешения Bluetooth для сканирования")
             return
         }
-
-        val adapter = bluetoothAdapter
-        if (adapter == null) {
+        val adapter = bluetoothAdapter ?: run {
             _connectionState.value = ConnectionState.Error("Bluetooth LE недоступен")
             return
         }
-
         if (!adapter.isEnabled) {
             _connectionState.value = ConnectionState.Error("Включите Bluetooth")
             return
         }
-
-        val scanner = adapter.bluetoothLeScanner
-        if (scanner == null) {
+        val scanner = adapter.bluetoothLeScanner ?: run {
             _connectionState.value = ConnectionState.Error("BLE scanner недоступен")
             return
         }
@@ -125,14 +143,13 @@ class MeshtasticTransport(private val context: Context) {
             val settings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build()
-
             scanner.startScan(listOf(ScanFilter.Builder().build()), settings, scanCallback)
             scheduleScanTimeout()
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "Missing Bluetooth permissions for scan", securityException)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Missing Bluetooth permissions for scan", e)
             _connectionState.value = ConnectionState.Error("Нет разрешения Bluetooth для сканирования")
-        } catch (throwable: Throwable) {
-            Log.e(TAG, "Unexpected startScan failure", throwable)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Unexpected startScan failure", e)
             _connectionState.value = ConnectionState.Error("Не удалось запустить сканирование")
         }
     }
@@ -143,32 +160,30 @@ class MeshtasticTransport(private val context: Context) {
         val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
         try {
             scanner.stopScan(scanCallback)
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "Missing Bluetooth permissions for stopScan", securityException)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Missing Bluetooth permissions for stopScan", e)
         }
     }
+
+    // ── Подключение ────────────────────────────────────────────────────────────
 
     fun connect(deviceAddress: String) {
         if (!hasConnectPermission()) {
             _connectionState.value = ConnectionState.Error("Нет разрешения Bluetooth для подключения")
             return
         }
-
-        val adapter = bluetoothAdapter
-        if (adapter == null) {
+        val adapter = bluetoothAdapter ?: run {
             _connectionState.value = ConnectionState.Error("Bluetooth недоступен")
             return
         }
-
         if (!adapter.isEnabled) {
             _connectionState.value = ConnectionState.Error("Включите Bluetooth")
             return
         }
-
         val device = try {
             adapter.getRemoteDevice(deviceAddress)
-        } catch (illegalArgumentException: IllegalArgumentException) {
-            Log.e(TAG, "Invalid Bluetooth address: $deviceAddress", illegalArgumentException)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "Invalid Bluetooth address: $deviceAddress", e)
             _connectionState.value = ConnectionState.Error("Некорректный адрес устройства")
             return
         }
@@ -185,6 +200,7 @@ class MeshtasticTransport(private val context: Context) {
         shouldAutoReconnect = false
         lastConnectedAddress = null
         reconnectAttempt = 0
+        myNodeNum = 0
 
         scope.launch {
             reconnectJob?.cancelAndJoin()
@@ -195,28 +211,39 @@ class MeshtasticTransport(private val context: Context) {
         _connectionState.value = ConnectionState.Disconnected
     }
 
+    // ── Отправка сообщений ─────────────────────────────────────────────────────
+
     suspend fun sendMessage(text: String): Result<Unit> {
-        val client = bleClient ?: return Result.failure(IllegalStateException("Not connected"))
+        val client = bleClient
+            ?: return Result.failure(IllegalStateException("Not connected"))
+
+        if (myNodeNum == 0) {
+            Log.w(TAG, "sendMessage: myNodeNum not yet received from ESP, using fallback")
+        }
 
         return try {
-            val packet = MeshtasticPacketFactory.createTextMessage(
+            val packet = MeshtasticPacketFactory.createTextMeshPacket(
                 text = text,
-                fromNodeId = MY_NODE_ID
+                fromNodeId = myNodeNum  // 0 до завершения handshake, потом реальный ID
             )
             client.sendPacket(packet)
+            Log.d(TAG, "Message sent: \"$text\" from=${MeshtasticPacketFactory.formatNodeId(myNodeNum)}")
             Result.success(Unit)
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "No permission to write BLE characteristic", securityException)
-            Result.failure(securityException)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "No permission to write BLE characteristic", e)
+            Result.failure(e)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send message", e)
             Result.failure(e)
         }
     }
 
+    // ── Внутренняя логика подключения ─────────────────────────────────────────
+
     private fun connectInternal(device: BluetoothDevice) {
         clearClient()
         _connectionState.value = ConnectionState.Connecting
+        myNodeNum = 0
 
         val client = MeshtasticBleClient(context)
         bleClient = client
@@ -231,7 +258,17 @@ class MeshtasticTransport(private val context: Context) {
                     val deviceName = safeDeviceName(device)
                     Log.d(TAG, "Connected to $deviceName (${device.address})")
                     _connectionState.value = ConnectionState.Connected(deviceName)
+
+                    // ① Запустить handshake — ESP ответит my_info + node_info + config_complete_id
+                    client.sendWantConfig()
+
+                    // ② Слушать входящие пакеты
                     observeIncomingPackets(client)
+
+                    // ③ Следить за node ID (обновится после my_info)
+                    observeMyNodeNum(client)
+
+                    // ④ Следить за потерей соединения
                     monitorConnectionLoss(client)
                 }
                 .fail { _, status ->
@@ -240,37 +277,75 @@ class MeshtasticTransport(private val context: Context) {
                     scheduleReconnect("connect fail status=$status")
                 }
                 .enqueue()
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "Missing Bluetooth permissions for connect", securityException)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Missing Bluetooth permissions for connect", e)
             _connectionState.value = ConnectionState.Error("Нет разрешения Bluetooth для подключения")
-        } catch (throwable: Throwable) {
-            Log.e(TAG, "Unexpected connect exception", throwable)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Unexpected connect exception", e)
             _connectionState.value = ConnectionState.Error("Ошибка подключения")
             scheduleReconnect("connect exception")
         }
     }
 
+    /**
+     * Слушаем входящие MeshPacket и конвертируем в ChatMessage.
+     * Игнорируем не-текстовые пакеты.
+     */
     private fun observeIncomingPackets(client: MeshtasticBleClient) {
         incomingJob?.cancel()
         incomingJob = scope.launch {
             client.incomingPackets.collect { packet ->
                 val text = MeshtasticPacketFactory.extractTextFromPacket(packet) ?: return@collect
+
+                // Пакет от нас самих — не добавлять (может прийти эхо)
+                if (packet.from == myNodeNum && myNodeNum != 0) {
+                    Log.d(TAG, "Ignoring echo from self")
+                    return@collect
+                }
+
                 val message = ChatMessage(
                     id = packet.id.toString(),
                     text = text,
-                    sender = formatNodeId(packet.from),
-                    timestamp = System.currentTimeMillis(),
+                    sender = MeshtasticPacketFactory.formatNodeId(packet.from),
+                    timestamp = if (packet.rxTime != 0) {
+                        packet.rxTime.toLong() * 1000
+                    } else {
+                        System.currentTimeMillis()
+                    },
                     isMine = false,
                     status = MessageStatus.SENT
                 )
 
                 val current = _incomingMessages.value.toMutableList()
-                current.add(message)
-                _incomingMessages.value = current
+                // Дедупликация по id
+                if (current.none { it.id == message.id }) {
+                    current.add(message)
+                    _incomingMessages.value = current
+                    Log.d(TAG, "New message from ${message.sender}: \"${message.text}\"")
+                }
             }
         }
     }
 
+    /**
+     * Следим за myNodeNum в BleClient — он обновится когда ESP пришлёт my_info.
+     */
+    private fun observeMyNodeNum(client: MeshtasticBleClient) {
+        nodeIdObserveJob?.cancel()
+        nodeIdObserveJob = scope.launch {
+            client.myNodeNum.collect { nodeNum ->
+                if (nodeNum != 0) {
+                    myNodeNum = nodeNum
+                    Log.i(TAG, "Our node ID: ${MeshtasticPacketFactory.formatNodeId(nodeNum)}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Следим за состоянием BLE-соединения.
+     * При разрыве — планируем переподключение.
+     */
     private fun monitorConnectionLoss(client: MeshtasticBleClient) {
         connectionMonitorJob?.cancel()
         connectionMonitorJob = scope.launch {
@@ -284,11 +359,14 @@ class MeshtasticTransport(private val context: Context) {
         }
     }
 
+    // ── Переподключение ────────────────────────────────────────────────────────
+
     private fun scheduleReconnect(reason: String) {
         if (!shouldAutoReconnect) return
         val address = lastConnectedAddress ?: return
+
         if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "Reconnect limit reached after reason: $reason")
+            Log.e(TAG, "Reconnect limit reached after: $reason")
             _connectionState.value = ConnectionState.Error("Не удалось переподключиться")
             return
         }
@@ -296,20 +374,23 @@ class MeshtasticTransport(private val context: Context) {
         if (reconnectJob?.isActive == true) return
 
         reconnectJob = scope.launch {
-            reconnectAttempt += 1
-            Log.d(TAG, "Reconnect attempt #$reconnectAttempt due to: $reason")
-            delay(RECONNECT_DELAY_MS * reconnectAttempt)
+            reconnectAttempt++
+            val delayMs = RECONNECT_DELAY_MS * reconnectAttempt
+            Log.d(TAG, "Reconnect #$reconnectAttempt in ${delayMs}ms, reason: $reason")
+            delay(delayMs)
+
+            if (!shouldAutoReconnect) return@launch
 
             val adapter = bluetoothAdapter
-            if (!shouldAutoReconnect || adapter == null || !adapter.isEnabled) {
+            if (adapter == null || !adapter.isEnabled) {
                 _connectionState.value = ConnectionState.Error("Bluetooth недоступен для переподключения")
                 return@launch
             }
 
             val device = try {
                 adapter.getRemoteDevice(address)
-            } catch (ex: IllegalArgumentException) {
-                Log.e(TAG, "Reconnect failed, invalid address: $address", ex)
+            } catch (e: IllegalArgumentException) {
+                Log.e(TAG, "Reconnect failed, invalid address: $address", e)
                 _connectionState.value = ConnectionState.Error("Некорректный адрес устройства")
                 return@launch
             }
@@ -318,21 +399,20 @@ class MeshtasticTransport(private val context: Context) {
         }
     }
 
-    private fun clearClient() {
-        incomingJob?.cancel()
-        incomingJob = null
+    // ── Вспомогательные методы ─────────────────────────────────────────────────
 
-        connectionMonitorJob?.cancel()
-        connectionMonitorJob = null
+    private fun clearClient() {
+        incomingJob?.cancel();        incomingJob = null
+        connectionMonitorJob?.cancel(); connectionMonitorJob = null
+        nodeIdObserveJob?.cancel();   nodeIdObserveJob = null
 
         try {
             bleClient?.disconnect()?.enqueue()
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "No permission to disconnect BLE", securityException)
-        } catch (throwable: Throwable) {
-            Log.e(TAG, "Unexpected BLE disconnect error", throwable)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "No permission to disconnect BLE", e)
+        } catch (e: Throwable) {
+            Log.e(TAG, "Unexpected BLE disconnect error", e)
         }
-
         bleClient = null
     }
 
@@ -351,81 +431,58 @@ class MeshtasticTransport(private val context: Context) {
         if (!hasConnectPermission()) return
         try {
             adapter.bondedDevices
-                ?.asSequence()
-                ?.filter { device -> isLikelyEspMeshtastic(device, null) }
+                ?.filter { isLikelyMeshtastic(it, null) }
                 ?.forEach { device ->
-                    val address = device.address ?: return@forEach
-                    if (address.isBlank()) return@forEach
-                    upsertDevice(
-                        MeshtasticDevice(
-                            address = address,
-                            name = safeDeviceName(device),
-                            rssi = Int.MIN_VALUE
-                        )
-                    )
+                    val address = device.address?.takeIf { it.isNotBlank() } ?: return@forEach
+                    upsertDevice(MeshtasticDevice(address, safeDeviceName(device), Int.MIN_VALUE))
                 }
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "No permission to read bonded devices", securityException)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "No permission to read bonded devices", e)
         }
     }
 
     private fun upsertDevice(device: MeshtasticDevice) {
         val current = _discoveredDevices.value.toMutableList()
         val index = current.indexOfFirst { it.address == device.address }
-        if (index >= 0) {
-            current[index] = device
-        } else {
-            current.add(device)
-        }
+        if (index >= 0) current[index] = device else current.add(device)
         _discoveredDevices.value = current.sortedByDescending { it.rssi }
     }
 
-    private fun isLikelyEspMeshtastic(device: BluetoothDevice, result: ScanResult?): Boolean {
+    /**
+     * Эвристика: устройство похоже на Meshtastic-устройство,
+     * если его имя содержит известные ключевые слова
+     * или его BLE-сервис совпадает с официальным UUID Meshtastic.
+     */
+    private fun isLikelyMeshtastic(device: BluetoothDevice, result: ScanResult?): Boolean {
         val name = safeDeviceName(device).lowercase()
-        if (
-            name.contains("meshtastic") ||
+        if (name.contains("meshtastic") ||
             name.contains("heltec") ||
             name.contains("esp32") ||
             name.contains("t-beam") ||
             name.contains("lora")
-        ) {
-            return true
-        }
+        ) return true
 
-        return result
-            ?.scanRecord
-            ?.serviceUuids
+        return result?.scanRecord?.serviceUuids
             ?.any { it?.uuid == MeshtasticBleClient.SERVICE_UUID } == true
     }
 
-    private fun safeDeviceName(device: BluetoothDevice): String {
-        return try {
-            device.name?.ifBlank { "Unknown" } ?: "Unknown"
-        } catch (securityException: SecurityException) {
-            Log.e(TAG, "No permission to read device name", securityException)
-            "Unknown"
-        }
-    }
+    private fun safeDeviceName(device: BluetoothDevice): String =
+        try { device.name?.ifBlank { "Unknown" } ?: "Unknown" }
+        catch (e: SecurityException) { "Unknown" }
 
     private fun hasScanPermission(): Boolean {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
             Manifest.permission.BLUETOOTH_SCAN
-        } else {
+        else
             Manifest.permission.ACCESS_FINE_LOCATION
-        }
-        return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun hasConnectPermission(): Boolean {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
             Manifest.permission.BLUETOOTH_CONNECT
-        } else {
+        else
             Manifest.permission.BLUETOOTH
-        }
-        return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun formatNodeId(nodeId: Int): String {
-        return "!${nodeId.toString(16).uppercase().takeLast(8)}"
+        return ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
     }
 }
