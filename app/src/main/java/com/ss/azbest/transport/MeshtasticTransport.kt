@@ -34,7 +34,7 @@ class MeshtasticTransport(private val context: Context) {
         private const val TAG = "MeshtasticTransport"
         private const val MY_NODE_ID = 0x12345678 // Placeholder
         private const val SCAN_TIMEOUT_MS = 12_000L
-        private const val CONNECT_TIMEOUT_MS = 10_000
+        private const val CONNECT_TIMEOUT_MS = 10_000L
         private const val CONNECT_RETRIES = 2
         private const val CONNECT_RETRY_DELAY_MS = 150
         private const val MAX_RECONNECT_ATTEMPTS = 5
