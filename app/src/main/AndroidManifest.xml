@@ -34,7 +34,12 @@
             android:name=".MainActivity"
             android:exported="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
+            <!--
+                configChanges — Activity НЕ пересоздаётся при повороте/изменении размера.
+                Вместо этого вызывается onConfigurationChanged(), Compose перекомпонует UI сам.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

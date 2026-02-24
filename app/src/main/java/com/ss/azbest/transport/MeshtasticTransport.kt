@@ -217,14 +217,17 @@ class MeshtasticTransport(private val context: Context) {
         val client = bleClient
             ?: return Result.failure(IllegalStateException("Not connected"))
 
+        // ESP отбрасывает пакеты с from=0 — ждём пока придёт my_info от ESP
         if (myNodeNum == 0) {
-            Log.w(TAG, "sendMessage: myNodeNum not yet received from ESP, using fallback")
+            return Result.failure(
+                IllegalStateException("Node ID ещё не получен от ESP. Подождите секунду и попробуйте снова.")
+            )
         }
 
         return try {
             val packet = MeshtasticPacketFactory.createTextMeshPacket(
                 text = text,
-                fromNodeId = myNodeNum  // 0 до завершения handshake, потом реальный ID
+                fromNodeId = myNodeNum
             )
             client.sendPacket(packet)
             Log.d(TAG, "Message sent: \"$text\" from=${MeshtasticPacketFactory.formatNodeId(myNodeNum)}")
