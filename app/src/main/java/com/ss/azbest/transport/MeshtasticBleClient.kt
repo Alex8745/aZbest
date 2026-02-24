@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.content.Context
 import android.util.Log
 import com.meshtastic.proto.MeshProtos.FromRadio
+import com.ss.azbest.domain.MeshNodeInfo
 import com.meshtastic.proto.MeshProtos.MeshPacket
 import com.meshtastic.proto.MeshProtos.ToRadio
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +46,9 @@ class MeshtasticBleClient(context: Context) : BleManager(context) {
 
     private val _connectionState = MutableStateFlow(false)
     val connectionState: StateFlow<Boolean> = _connectionState.asStateFlow()
+
+    private val _knownNodes = MutableStateFlow<List<MeshNodeInfo>>(emptyList())
+    val knownNodes: StateFlow<List<MeshNodeInfo>> = _knownNodes.asStateFlow()
 
     private val bleScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -202,7 +206,19 @@ class MeshtasticBleClient(context: Context) : BleManager(context) {
 
             FromRadio.PayloadVariantCase.NODE_INFO -> {
                 val node = fromRadio.nodeInfo
-                Log.d(TAG, "node_info 0x${node.num.toString(16)} \"${node.user.longName}\"")
+                val nodeInfo = MeshNodeInfo(
+                    nodeNum = node.num,
+                    nodeId = "!${Integer.toUnsignedString(node.num, 16).padStart(8, '0')}",
+                    longName = node.user.longName.ifEmpty { "Unknown" },
+                    shortName = node.user.shortName.ifEmpty { "?" },
+                    snr = node.snr,
+                    lastHeard = System.currentTimeMillis()
+                )
+                val current = _knownNodes.value.toMutableList()
+                val idx = current.indexOfFirst { it.nodeNum == node.num }
+                if (idx >= 0) current[idx] = nodeInfo else current.add(nodeInfo)
+                _knownNodes.value = current
+                Log.d(TAG, "node_info saved: ${nodeInfo.nodeId} \"${nodeInfo.longName}\"")
             }
 
             FromRadio.PayloadVariantCase.CONFIG_COMPLETE_ID ->

@@ -14,6 +14,7 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.ss.azbest.domain.ChatMessage
+import com.ss.azbest.domain.MeshNodeInfo
 import com.ss.azbest.domain.ConnectionState
 import com.ss.azbest.domain.MessageStatus
 import com.ss.azbest.domain.MeshtasticDevice
@@ -86,6 +87,9 @@ class MeshtasticTransport(private val context: Context) {
 
     private val _incomingMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val incomingMessages: StateFlow<List<ChatMessage>> = _incomingMessages.asStateFlow()
+
+    private val _knownNodes = MutableStateFlow<List<MeshNodeInfo>>(emptyList())
+    val knownNodes: StateFlow<List<MeshNodeInfo>> = _knownNodes.asStateFlow()
 
     // ── Сканирование ──────────────────────────────────────────────────────────
 
@@ -213,7 +217,7 @@ class MeshtasticTransport(private val context: Context) {
 
     // ── Отправка сообщений ─────────────────────────────────────────────────────
 
-    suspend fun sendMessage(text: String): Result<Unit> {
+    suspend fun sendMessage(text: String, chatId: String = "general"): Result<Unit> {
         val client = bleClient
             ?: return Result.failure(IllegalStateException("Not connected"))
 
@@ -271,7 +275,10 @@ class MeshtasticTransport(private val context: Context) {
                     // ③ Следить за node ID (обновится после my_info)
                     observeMyNodeNum(client)
 
-                    // ④ Следить за потерей соединения
+                    // ④ Следить за нодами сети
+                    observeKnownNodes(client)
+
+                    // ⑤ Следить за потерей соединения
                     monitorConnectionLoss(client)
                 }
                 .fail { _, status ->
@@ -306,15 +313,18 @@ class MeshtasticTransport(private val context: Context) {
                     return@collect
                 }
 
+                // Определяем chatId: broadcast = "general", личное = адрес отправителя
+                val BROADCAST = 0xFFFFFFFF.toInt()
+                val chatId = if (packet.to == BROADCAST) "general"
+                             else MeshtasticPacketFactory.formatNodeId(packet.from)
+
                 val message = ChatMessage(
                     id = packet.id.toString(),
+                    chatId = chatId,
                     text = text,
                     sender = MeshtasticPacketFactory.formatNodeId(packet.from),
-                    timestamp = if (packet.rxTime != 0) {
-                        packet.rxTime.toLong() * 1000
-                    } else {
-                        System.currentTimeMillis()
-                    },
+                    // Всегда используем время телефона — у ESP часы могут быть не синхронизированы
+                    timestamp = System.currentTimeMillis(),
                     isMine = false,
                     status = MessageStatus.SENT
                 )
@@ -403,6 +413,14 @@ class MeshtasticTransport(private val context: Context) {
     }
 
     // ── Вспомогательные методы ─────────────────────────────────────────────────
+
+    private fun observeKnownNodes(client: MeshtasticBleClient) {
+        scope.launch {
+            client.knownNodes.collect { nodes ->
+                _knownNodes.value = nodes
+            }
+        }
+    }
 
     private fun clearClient() {
         incomingJob?.cancel();        incomingJob = null

@@ -16,23 +16,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -47,19 +34,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.ss.azbest.data.MessageRepository
 import com.ss.azbest.transport.MeshtasticTransport
-import com.ss.azbest.ui.theme.screens.ChatScreen
+import com.ss.azbest.ui.theme.screens.MainScreen
 import com.ss.azbest.ui.theme.viewmodel.ChatViewModel
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
-    // ViewModel создаётся один раз и переживает повороты экрана
-    // благодаря viewModels() — стандартный механизм Android
     private val chatViewModel: ChatViewModel by viewModels {
         object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val transport = MeshtasticTransport(applicationContext)
-                val repository = MessageRepository(transport)
+                val repository = MessageRepository(transport, applicationContext)
                 @Suppress("UNCHECKED_CAST")
                 return ChatViewModel(repository) as T
             }
@@ -71,11 +56,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    MeshtasticApp(viewModel = chatViewModel)
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    AppRoot(viewModel = chatViewModel)
                 }
             }
         }
@@ -83,8 +65,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun MeshtasticApp(viewModel: ChatViewModel) {
-    // rememberSaveable сохраняет значение при повороте (в отличие от remember)
+private fun AppRoot(viewModel: ChatViewModel) {
     var showSplash by rememberSaveable { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
@@ -114,18 +95,13 @@ private fun MeshtasticApp(viewModel: ChatViewModel) {
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        hasPermissions = context.hasAllPermissions(requiredPermissions)
-    }
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { hasPermissions = context.hasAllPermissions(requiredPermissions) }
 
     if (hasPermissions) {
-        // ViewModel передаётся снаружи — уже создан в Activity и переживает поворот
-        ChatScreen(viewModel = viewModel)
+        MainScreen(viewModel = viewModel)
     } else {
-        PermissionRequiredScreen {
-            permissionLauncher.launch(requiredPermissions.toTypedArray())
-        }
+        PermissionScreen { permissionLauncher.launch(requiredPermissions.toTypedArray()) }
     }
 }
 
@@ -136,85 +112,44 @@ private fun SplashScreen() {
 
     val alpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
-        animationSpec = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-        label = "splashAlpha"
+        animationSpec = tween(1200, easing = FastOutSlowInEasing),
+        label = "splash"
     )
 
     val context = LocalContext.current
-    val mainLogoResId = context.resources.getIdentifier(
-        "dasa_labs_logo_main", "drawable", context.packageName
-    )
-    val bottomLogoResId = context.resources.getIdentifier(
-        "dasa_labs_logo_bottom", "drawable", context.packageName
-    )
+    val mainLogoId = context.resources.getIdentifier("dasa_labs_logo_main", "drawable", context.packageName)
+    val bottomLogoId = context.resources.getIdentifier("dasa_labs_logo_bottom", "drawable", context.packageName)
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
-        if (mainLogoResId != 0) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (mainLogoId != 0) {
             Image(
-                painter = painterResource(id = mainLogoResId),
-                contentDescription = "DaSa Labs Main",
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(bottom = 112.dp)
-                    .splashSquareSize(240.dp)
-                    .alpha(alpha)
-            )
-        } else {
-            Text(
-                text = "DaSa Labs",
-                color = Color.White,
-                fontSize = 34.sp,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .padding(bottom = 150.dp)
-                    .alpha(alpha)
+                painterResource(mainLogoId), "Logo",
+                Modifier.align(Alignment.Center).padding(bottom = 112.dp).splashSize(240.dp).alpha(alpha)
             )
         }
-
-        if (bottomLogoResId != 0) {
+        if (bottomLogoId != 0) {
             Image(
-                painter = painterResource(id = bottomLogoResId),
-                contentDescription = "DaSa Labs Bottom",
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 20.dp)
-                    .splashSquareSize(93.dp)
-                    .alpha(alpha)
+                painterResource(bottomLogoId), "DaSa Labs",
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 20.dp).splashSize(93.dp).alpha(alpha)
             )
         }
     }
 }
 
-private fun Modifier.splashSquareSize(size: Dp): Modifier =
-    this.size(size).aspectRatio(1f)
-
 @Composable
-private fun PermissionRequiredScreen(onRequestPermissions: () -> Unit) {
+private fun PermissionScreen(onRequest: () -> Unit) {
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
+        Modifier.fillMaxSize().padding(24.dp),
+        Arrangement.Center, Alignment.CenterHorizontally
     ) {
-        Text(
-            text = "Для работы мессенджера нужны Bluetooth-разрешения.",
-            style = MaterialTheme.typography.bodyLarge
-        )
-        Button(
-            onClick = onRequestPermissions,
-            modifier = Modifier.padding(top = 16.dp)
-        ) {
+        Text("Для работы нужны Bluetooth-разрешения.", style = MaterialTheme.typography.bodyLarge)
+        Button(onClick = onRequest, modifier = Modifier.padding(top = 16.dp)) {
             Text("Выдать разрешения")
         }
     }
 }
 
-private fun Context.hasAllPermissions(permissions: List<String>): Boolean =
-    permissions.all {
-        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
+private fun Modifier.splashSize(size: Dp) = this.size(size).aspectRatio(1f)
+
+private fun Context.hasAllPermissions(permissions: List<String>) =
+    permissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }

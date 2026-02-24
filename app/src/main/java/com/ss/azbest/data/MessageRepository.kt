@@ -1,7 +1,10 @@
 package com.ss.azbest.data
 
+import android.content.Context
 import com.ss.azbest.domain.ChatMessage
+import com.ss.azbest.domain.ChatPreview
 import com.ss.azbest.domain.ConnectionState
+import com.ss.azbest.domain.MeshNodeInfo
 import com.ss.azbest.domain.MessageStatus
 import com.ss.azbest.domain.MeshtasticDevice
 import com.ss.azbest.transport.MeshtasticTransport
@@ -13,81 +16,164 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
 
-class MessageRepository(private val transport: MeshtasticTransport) {
+const val GENERAL_CHAT_ID = "general"
 
-    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
-    val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
-
-    val connectionState = transport.connectionState
-    val discoveredDevices = transport.discoveredDevices
-
+class MessageRepository(
+    private val transport: MeshtasticTransport,
+    context: Context
+) {
+    private val storage = ChatStorage(context)
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    // Сообщения по chatId (в памяти)
+    private val _messagesByChatId = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
+
+    // Список превью чатов для главного экрана
+    private val _chatPreviews = MutableStateFlow<List<ChatPreview>>(emptyList())
+    val chatPreviews: StateFlow<List<ChatPreview>> = _chatPreviews.asStateFlow()
+
+    // Известные ноды сети
+    private val _nodes = MutableStateFlow<List<MeshNodeInfo>>(emptyList())
+    val nodes: StateFlow<List<MeshNodeInfo>> = _nodes.asStateFlow()
+
+    val connectionState: StateFlow<ConnectionState> = transport.connectionState
+    val discoveredDevices: StateFlow<List<MeshtasticDevice>> = transport.discoveredDevices
+
     init {
+        loadPersistedMessages()
         observeIncomingMessages()
+        observeNodes()
     }
+
+    // ── Загрузка сохранённых сообщений ────────────────────────────────────────
+
+    private fun loadPersistedMessages() {
+        scope.launch {
+            val allIds = storage.getKnownChatIds().toMutableSet()
+            // Всегда показываем "general" даже если пустой
+            allIds.add(GENERAL_CHAT_ID)
+
+            val map = allIds.associateWith { chatId ->
+                storage.loadMessages(chatId).sortedBy { it.timestamp }
+            }
+            _messagesByChatId.value = map
+            refreshPreviews(map)
+        }
+    }
+
+    // ── Получение сообщений конкретного чата ──────────────────────────────────
+
+    fun messagesFor(chatId: String): StateFlow<List<ChatMessage>> {
+        // Ленивая инициализация потока для конкретного чата
+        return object : StateFlow<List<ChatMessage>> {
+            private val flow = MutableStateFlow(
+                _messagesByChatId.value[chatId] ?: emptyList()
+            ).also { mf ->
+                scope.launch {
+                    _messagesByChatId.collect { map ->
+                        mf.value = map[chatId] ?: emptyList()
+                    }
+                }
+            }
+            override val replayCache get() = flow.replayCache
+            override val value get() = flow.value
+            override suspend fun collect(collector: kotlinx.coroutines.flow.FlowCollector<List<ChatMessage>>) =
+                flow.collect(collector)
+        }
+    }
+
+    // ── Наблюдение за входящими ───────────────────────────────────────────────
 
     private fun observeIncomingMessages() {
         scope.launch {
             transport.incomingMessages.collect { incoming ->
-                val current = _messages.value.toMutableList()
-                incoming.forEach { msg ->
-                    if (current.none { it.id == msg.id }) {
-                        current.add(msg)
-                    }
+                incoming.forEach { message ->
+                    addMessage(message)
                 }
-                current.sortBy { it.timestamp }
-                _messages.value = current
             }
         }
     }
 
-    fun startScan() {
-        transport.startScan()
+    private fun observeNodes() {
+        scope.launch {
+            transport.knownNodes.collect { nodes ->
+                _nodes.value = nodes
+            }
+        }
     }
 
-    fun stopScan() {
-        transport.stopScan()
+    // ── Добавление сообщения ──────────────────────────────────────────────────
+
+    private fun addMessage(message: ChatMessage) {
+        val current = _messagesByChatId.value.toMutableMap()
+        val chatMessages = current[message.chatId]?.toMutableList() ?: mutableListOf()
+
+        // Дедупликация по id
+        if (chatMessages.none { it.id == message.id }) {
+            chatMessages.add(message)
+            // Сортировка по времени — ключевой фикс проблемы с timestamp
+            chatMessages.sortBy { it.timestamp }
+            current[message.chatId] = chatMessages
+            _messagesByChatId.value = current
+            storage.saveMessages(message.chatId, chatMessages)
+            refreshPreviews(current)
+        }
     }
 
-    fun connect(deviceAddress: String) {
-        transport.connect(deviceAddress)
+    private fun refreshPreviews(map: Map<String, List<ChatMessage>>) {
+        val previews = map.entries
+            .filter { it.key == GENERAL_CHAT_ID || it.value.isNotEmpty() }
+            .map { (chatId, messages) ->
+                val last = messages.lastOrNull()
+                ChatPreview(
+                    chatId = chatId,
+                    title = if (chatId == GENERAL_CHAT_ID) "Общий канал" else chatId,
+                    lastMessage = last?.text ?: "Нет сообщений",
+                    lastTimestamp = last?.timestamp ?: 0L,
+                    isGeneral = chatId == GENERAL_CHAT_ID
+                )
+            }
+            // Общий канал всегда первым, остальные по времени последнего сообщения
+            .sortedWith(compareByDescending<ChatPreview> { it.isGeneral }.thenByDescending { it.lastTimestamp })
+        _chatPreviews.value = previews
     }
 
-    fun disconnect() {
-        transport.disconnect()
-    }
+    // ── Отправка ──────────────────────────────────────────────────────────────
 
-    suspend fun sendMessage(text: String) {
+    suspend fun sendMessage(text: String, chatId: String = GENERAL_CHAT_ID): Boolean {
+        val tempId = UUID.randomUUID().toString()
         val message = ChatMessage(
-            id = UUID.randomUUID().toString(),
+            id = tempId,
+            chatId = chatId,
             text = text,
             sender = "Me",
             timestamp = System.currentTimeMillis(),
             isMine = true,
             status = MessageStatus.SENDING
         )
+        addMessage(message)
 
-        val current = _messages.value.toMutableList()
-        current.add(message)
-        _messages.value = current
+        val result = transport.sendMessage(text, chatId)
 
-        val result = transport.sendMessage(text)
+        // Обновляем статус после отправки
+        val current = _messagesByChatId.value.toMutableMap()
+        val updated = current[chatId]?.map {
+            if (it.id == tempId) {
+                it.copy(status = if (result.isSuccess) MessageStatus.SENT else MessageStatus.FAILED)
+            } else it
+        } ?: return result.isSuccess
 
-        if (result.isFailure) {
-            val updated = _messages.value.map {
-                if (it.id == message.id) {
-                    it.copy(status = MessageStatus.FAILED)
-                } else it
-            }
-            _messages.value = updated
-        } else {
-            val updated = _messages.value.map {
-                if (it.id == message.id) {
-                    it.copy(status = MessageStatus.SENT)
-                } else it
-            }
-            _messages.value = updated
-        }
+        current[chatId] = updated
+        _messagesByChatId.value = current
+        storage.saveMessages(chatId, updated)
+
+        return result.isSuccess
     }
+
+    // ── BLE управление ────────────────────────────────────────────────────────
+
+    fun startScan() = transport.startScan()
+    fun stopScan() = transport.stopScan()
+    fun connect(address: String) = transport.connect(address)
+    fun disconnect() = transport.disconnect()
 }

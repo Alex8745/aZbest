@@ -2,6 +2,7 @@ package com.ss.azbest.domain
 
 data class ChatMessage(
     val id: String,
+    val chatId: String,          // "general" или "!nodeId" для личных
     val text: String,
     val sender: String,
     val timestamp: Long,
@@ -9,11 +10,7 @@ data class ChatMessage(
     val status: MessageStatus = MessageStatus.SENT
 )
 
-enum class MessageStatus {
-    SENDING,
-    SENT,
-    FAILED
-}
+enum class MessageStatus { SENDING, SENT, FAILED }
 
 data class MeshtasticDevice(
     val address: String,
