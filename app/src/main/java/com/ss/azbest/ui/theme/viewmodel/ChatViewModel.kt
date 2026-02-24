@@ -43,8 +43,6 @@ class ChatViewModel(private val repository: MessageRepository) : ViewModel() {
     val sendError: StateFlow<String?> = _sendError.asStateFlow()
 
     // ── Непрочитанные ─────────────────────────────────────────────────────────
-    private val _totalUnread = MutableStateFlow(0)
-    val totalUnread: StateFlow<Int> = _totalUnread.asStateFlow()
 
     // ── LoRa настройки ────────────────────────────────────────────────────────
     private val _loraSettings = MutableStateFlow(LoraSettings())

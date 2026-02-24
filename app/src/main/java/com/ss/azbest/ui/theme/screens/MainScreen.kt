@@ -12,6 +12,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ss.azbest.ui.theme.viewmodel.ChatViewModel
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+
 
 enum class AppTab(val label: String, val icon: String) {
     CHATS("Чаты", "💬"),
