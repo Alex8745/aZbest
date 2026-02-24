@@ -25,19 +25,30 @@ class MessageRepository(
     private val storage = ChatStorage(context)
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    // Сообщения по chatId (в памяти)
     private val _messagesByChatId = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
 
-    // Список превью чатов для главного экрана
     private val _chatPreviews = MutableStateFlow<List<ChatPreview>>(emptyList())
     val chatPreviews: StateFlow<List<ChatPreview>> = _chatPreviews.asStateFlow()
 
-    // Известные ноды сети
     private val _nodes = MutableStateFlow<List<MeshNodeInfo>>(emptyList())
     val nodes: StateFlow<List<MeshNodeInfo>> = _nodes.asStateFlow()
 
     val connectionState: StateFlow<ConnectionState> = transport.connectionState
     val discoveredDevices: StateFlow<List<MeshtasticDevice>> = transport.discoveredDevices
+
+    // Счётчик непрочитанных по chatId
+    private val unreadCounts = mutableMapOf<String, Int>()
+
+    // ID чата который сейчас открыт (обновляется из ViewModel)
+    var activeChatId: String? = null
+        set(value) {
+            field = value
+            // Сброс счётчика когда открываем чат
+            if (value != null) {
+                unreadCounts[value] = 0
+                refreshPreviews(_messagesByChatId.value)
+            }
+        }
 
     init {
         loadPersistedMessages()
@@ -45,14 +56,10 @@ class MessageRepository(
         observeNodes()
     }
 
-    // ── Загрузка сохранённых сообщений ────────────────────────────────────────
-
     private fun loadPersistedMessages() {
         scope.launch {
             val allIds = storage.getKnownChatIds().toMutableSet()
-            // Всегда показываем "general" даже если пустой
             allIds.add(GENERAL_CHAT_ID)
-
             val map = allIds.associateWith { chatId ->
                 storage.loadMessages(chatId).sortedBy { it.timestamp }
             }
@@ -61,18 +68,13 @@ class MessageRepository(
         }
     }
 
-    // ── Получение сообщений конкретного чата ──────────────────────────────────
-
     fun messagesFor(chatId: String): StateFlow<List<ChatMessage>> {
-        // Ленивая инициализация потока для конкретного чата
         return object : StateFlow<List<ChatMessage>> {
             private val flow = MutableStateFlow(
                 _messagesByChatId.value[chatId] ?: emptyList()
             ).also { mf ->
                 scope.launch {
-                    _messagesByChatId.collect { map ->
-                        mf.value = map[chatId] ?: emptyList()
-                    }
+                    _messagesByChatId.collect { map -> mf.value = map[chatId] ?: emptyList() }
                 }
             }
             override val replayCache get() = flow.replayCache
@@ -82,40 +84,36 @@ class MessageRepository(
         }
     }
 
-    // ── Наблюдение за входящими ───────────────────────────────────────────────
-
     private fun observeIncomingMessages() {
         scope.launch {
             transport.incomingMessages.collect { incoming ->
-                incoming.forEach { message ->
-                    addMessage(message)
-                }
+                incoming.forEach { message -> addMessage(message, fromRemote = true) }
             }
         }
     }
 
     private fun observeNodes() {
         scope.launch {
-            transport.knownNodes.collect { nodes ->
-                _nodes.value = nodes
-            }
+            transport.knownNodes.collect { nodes -> _nodes.value = nodes }
         }
     }
 
-    // ── Добавление сообщения ──────────────────────────────────────────────────
-
-    private fun addMessage(message: ChatMessage) {
+    private fun addMessage(message: ChatMessage, fromRemote: Boolean = false) {
         val current = _messagesByChatId.value.toMutableMap()
         val chatMessages = current[message.chatId]?.toMutableList() ?: mutableListOf()
 
-        // Дедупликация по id
         if (chatMessages.none { it.id == message.id }) {
             chatMessages.add(message)
-            // Сортировка по времени — ключевой фикс проблемы с timestamp
             chatMessages.sortBy { it.timestamp }
             current[message.chatId] = chatMessages
             _messagesByChatId.value = current
             storage.saveMessages(message.chatId, chatMessages)
+
+            // Увеличиваем счётчик непрочитанных если чат не открыт и сообщение входящее
+            if (fromRemote && !message.isMine && activeChatId != message.chatId) {
+                unreadCounts[message.chatId] = (unreadCounts[message.chatId] ?: 0) + 1
+            }
+
             refreshPreviews(current)
         }
     }
@@ -130,15 +128,16 @@ class MessageRepository(
                     title = if (chatId == GENERAL_CHAT_ID) "Общий канал" else chatId,
                     lastMessage = last?.text ?: "Нет сообщений",
                     lastTimestamp = last?.timestamp ?: 0L,
-                    isGeneral = chatId == GENERAL_CHAT_ID
+                    isGeneral = chatId == GENERAL_CHAT_ID,
+                    unreadCount = unreadCounts[chatId] ?: 0
                 )
             }
-            // Общий канал всегда первым, остальные по времени последнего сообщения
             .sortedWith(compareByDescending<ChatPreview> { it.isGeneral }.thenByDescending { it.lastTimestamp })
         _chatPreviews.value = previews
     }
 
-    // ── Отправка ──────────────────────────────────────────────────────────────
+    // Общее количество непрочитанных (для бейджа на вкладке)
+    fun totalUnread(): Int = unreadCounts.values.sum()
 
     suspend fun sendMessage(text: String, chatId: String = GENERAL_CHAT_ID): Boolean {
         val tempId = UUID.randomUUID().toString()
@@ -155,12 +154,11 @@ class MessageRepository(
 
         val result = transport.sendMessage(text, chatId)
 
-        // Обновляем статус после отправки
         val current = _messagesByChatId.value.toMutableMap()
         val updated = current[chatId]?.map {
-            if (it.id == tempId) {
+            if (it.id == tempId)
                 it.copy(status = if (result.isSuccess) MessageStatus.SENT else MessageStatus.FAILED)
-            } else it
+            else it
         } ?: return result.isSuccess
 
         current[chatId] = updated
@@ -169,8 +167,6 @@ class MessageRepository(
 
         return result.isSuccess
     }
-
-    // ── BLE управление ────────────────────────────────────────────────────────
 
     fun startScan() = transport.startScan()
     fun stopScan() = transport.stopScan()

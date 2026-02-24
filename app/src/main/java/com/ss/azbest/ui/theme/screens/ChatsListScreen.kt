@@ -1,7 +1,11 @@
 package com.ss.azbest.ui.theme.screens
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -115,6 +119,7 @@ fun ChatsListScreen(
 @Composable
 private fun ChatPreviewItem(preview: ChatPreview, onClick: () -> Unit) {
     val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+    val hasUnread = preview.unreadCount > 0
 
     Row(
         modifier = Modifier
@@ -150,21 +155,44 @@ private fun ChatPreviewItem(preview: ChatPreview, onClick: () -> Unit) {
                     text = preview.title,
                     color = Color.White,
                     fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f)
                 )
-                if (preview.lastTimestamp > 0) {
-                    Text(
-                        text = timeFormat.format(Date(preview.lastTimestamp)),
-                        color = Color(0xFF8E8E93),
-                        fontSize = 12.sp
-                    )
+                Spacer(Modifier.width(8.dp))
+                // Время + бейдж
+                Column(horizontalAlignment = Alignment.End) {
+                    if (preview.lastTimestamp > 0) {
+                        Text(
+                            text = timeFormat.format(Date(preview.lastTimestamp)),
+                            color = if (hasUnread) Color(0xFF0084FF) else Color(0xFF8E8E93),
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (hasUnread) {
+                        Spacer(Modifier.height(3.dp))
+                        Box(
+                            modifier = Modifier
+                                .background(Color(0xFFFF3B30), CircleShape)
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (preview.unreadCount > 99) "99+" else preview.unreadCount.toString(),
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))
+            // Непрочитанное — жирный белый, прочитанное — серый
             Text(
                 text = preview.lastMessage,
-                color = Color(0xFF8E8E93),
+                color = if (hasUnread) Color.White else Color(0xFF8E8E93),
                 fontSize = 14.sp,
+                fontWeight = if (hasUnread) FontWeight.Medium else FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

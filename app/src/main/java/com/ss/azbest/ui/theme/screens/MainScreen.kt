@@ -1,9 +1,12 @@
 package com.ss.azbest.ui.theme.screens
 
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -20,6 +23,7 @@ enum class AppTab(val label: String, val icon: String) {
 fun MainScreen(viewModel: ChatViewModel) {
     var currentTab by rememberSaveable { mutableStateOf(AppTab.CHATS) }
     var openedChatId by rememberSaveable { mutableStateOf<String?>(null) }
+    val totalUnread by viewModel.totalUnread.collectAsState()
 
     // Открытый чат — полный экран без bottom bar
     if (openedChatId != null) {
@@ -39,10 +43,33 @@ fun MainScreen(viewModel: ChatViewModel) {
                 tonalElevation = 0.dp
             ) {
                 AppTab.values().forEach { tab ->
+                    val showBadge = tab == AppTab.CHATS && totalUnread > 0
                     NavigationBarItem(
                         selected = currentTab == tab,
                         onClick = { currentTab = tab },
-                        icon = { Text(tab.icon, fontSize = 20.sp) },
+                        icon = {
+                            Box {
+                                Text(tab.icon, fontSize = 20.sp)
+                                // Бейдж с количеством непрочитанных
+                                if (showBadge) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .offset(x = 6.dp, y = (-4).dp)
+                                            .size(if (totalUnread > 9) 18.dp else 16.dp)
+                                            .background(Color(0xFFFF3B30), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (totalUnread > 99) "99+" else totalUnread.toString(),
+                                            color = Color.White,
+                                            fontSize = 9.sp,
+                                            lineHeight = 9.sp
+                                        )
+                                    }
+                                }
+                            }
+                        },
                         label = {
                             Text(
                                 text = tab.label,
@@ -73,10 +100,7 @@ fun MainScreen(viewModel: ChatViewModel) {
                 viewModel = viewModel,
                 modifier = Modifier.padding(padding),
                 onNodeSelected = { nodeId ->
-                    // Переходим в личный чат с нодой:
-                    // 1. Переключаем вкладку на Чаты
                     currentTab = AppTab.CHATS
-                    // 2. Открываем/создаём чат с этой нодой
                     viewModel.openChat(nodeId)
                     openedChatId = nodeId
                 }
