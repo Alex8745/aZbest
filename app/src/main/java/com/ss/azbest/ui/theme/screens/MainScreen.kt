@@ -6,9 +6,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ss.azbest.ui.theme.viewmodel.ChatViewModel
-import androidx.compose.ui.unit.dp
 
 enum class AppTab(val label: String, val icon: String) {
     CHATS("Чаты", "💬"),
@@ -19,11 +19,10 @@ enum class AppTab(val label: String, val icon: String) {
 @Composable
 fun MainScreen(viewModel: ChatViewModel) {
     var currentTab by rememberSaveable { mutableStateOf(AppTab.CHATS) }
-    // null = список чатов, non-null = открытый чат
     var openedChatId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Если открыт конкретный чат — показываем его без bottom bar
-    if (currentTab == AppTab.CHATS && openedChatId != null) {
+    // Открытый чат — полный экран без bottom bar
+    if (openedChatId != null) {
         ChatDetailScreen(
             chatId = openedChatId!!,
             viewModel = viewModel,
@@ -43,15 +42,12 @@ fun MainScreen(viewModel: ChatViewModel) {
                     NavigationBarItem(
                         selected = currentTab == tab,
                         onClick = { currentTab = tab },
-                        icon = {
-                            Text(tab.icon, fontSize = 20.sp)
-                        },
+                        icon = { Text(tab.icon, fontSize = 20.sp) },
                         label = {
                             Text(
                                 text = tab.label,
                                 fontSize = 11.sp,
-                                color = if (currentTab == tab) Color(0xFF0084FF)
-                                        else Color(0xFF8E8E93)
+                                color = if (currentTab == tab) Color(0xFF0084FF) else Color(0xFF8E8E93)
                             )
                         },
                         colors = NavigationBarItemDefaults.colors(
@@ -75,7 +71,15 @@ fun MainScreen(viewModel: ChatViewModel) {
             )
             AppTab.NODES -> NodesScreen(
                 viewModel = viewModel,
-                modifier = Modifier.padding(padding)
+                modifier = Modifier.padding(padding),
+                onNodeSelected = { nodeId ->
+                    // Переходим в личный чат с нодой:
+                    // 1. Переключаем вкладку на Чаты
+                    currentTab = AppTab.CHATS
+                    // 2. Открываем/создаём чат с этой нодой
+                    viewModel.openChat(nodeId)
+                    openedChatId = nodeId
+                }
             )
             AppTab.SETTINGS -> SettingsScreen(
                 viewModel = viewModel,

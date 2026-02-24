@@ -28,6 +28,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.meshtastic.proto.AdminProtos.AdminMessage
+import com.meshtastic.proto.ConfigProtos.Config
+import com.meshtastic.proto.ConfigProtos.Config.LoRaConfig
+import com.meshtastic.proto.ConfigProtos.Config.LoRaConfig.ModemPreset
+import com.meshtastic.proto.MeshProtos.Data
+import com.meshtastic.proto.MeshProtos.MeshPacket
+import com.meshtastic.proto.Portnums.PortNum
 
 /**
  * Транспортный слой: управляет BLE-соединением с Meshtastic-устройством.
@@ -245,7 +252,56 @@ class MeshtasticTransport(private val context: Context) {
         }
     }
 
-    // ── Внутренняя логика подключения ─────────────────────────────────────────
+    /**
+     * Отправить LoRa-конфиг на ESP через AdminMessage.set_config.
+     * После получения ESP перезагрузится с новыми настройками.
+     */
+    fun sendLoraConfig(
+        usePreset: Boolean,
+        presetValue: Int,
+        overrideFrequency: Float
+    ): Result<Unit> {
+        val client = bleClient
+            ?: return Result.failure(IllegalStateException("Нет подключения"))
+
+        return try {
+            val preset = ModemPreset.forNumber(presetValue) ?: ModemPreset.LONG_FAST
+            val loraConfig = LoRaConfig.newBuilder()
+                .setUsePreset(usePreset)
+                .apply {
+                    if (usePreset) setModemPreset(preset)
+                    else setOverrideFrequency(overrideFrequency)
+                }
+                .build()
+
+            val config = Config.newBuilder().setLora(loraConfig).build()
+            val adminMessage = AdminMessage.newBuilder().setSetConfig(config).build()
+
+            val adminData = Data.newBuilder()
+                .setPortnum(PortNum.ADMIN_APP)
+                .setPayload(adminMessage.toByteString())
+                .setWantResponse(true)
+                .build()
+
+            val packet = MeshPacket.newBuilder()
+                .setFrom(myNodeNum)
+                .setTo(myNodeNum)
+                .setDecoded(adminData)
+                .setId((System.currentTimeMillis() % Int.MAX_VALUE).toInt())
+                .setPriority(MeshPacket.Priority.RELIABLE)
+                .setHopLimit(0)
+                .build()
+
+            scope.launch { client.sendPacket(packet) }
+            Log.i(TAG, "LoRa config sent: usePreset=$usePreset preset=$presetValue freq=$overrideFrequency")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send LoRa config", e)
+            Result.failure(e)
+        }
+    }
+
+        // ── Внутренняя логика подключения ─────────────────────────────────────────
 
     private fun connectInternal(device: BluetoothDevice) {
         clearClient()

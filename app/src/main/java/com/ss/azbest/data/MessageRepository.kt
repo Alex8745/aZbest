@@ -176,4 +176,10 @@ class MessageRepository(
     fun stopScan() = transport.stopScan()
     fun connect(address: String) = transport.connect(address)
     fun disconnect() = transport.disconnect()
+
+    fun sendLoraConfig(
+        usePreset: Boolean,
+        presetValue: Int,
+        overrideFrequency: Float
+    ): Result<Unit> = transport.sendLoraConfig(usePreset, presetValue, overrideFrequency)
 }
