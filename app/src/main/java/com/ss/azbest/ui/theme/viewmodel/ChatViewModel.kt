@@ -43,12 +43,13 @@ class ChatViewModel(private val repository: MessageRepository) : ViewModel() {
     val sendError: StateFlow<String?> = _sendError.asStateFlow()
 
     // ── Непрочитанные ─────────────────────────────────────────────────────────
+    private val _totalUnread = MutableStateFlow(0)
+    val totalUnread: StateFlow<Int> = _totalUnread.asStateFlow()
 
     // ── LoRa настройки ────────────────────────────────────────────────────────
     private val _loraSettings = MutableStateFlow(LoraSettings())
     val loraSettings: StateFlow<LoraSettings> = _loraSettings.asStateFlow()
 
-    // Результат применения настроек (показывается в snackbar)
     private val _settingsResult = MutableStateFlow<String?>(null)
     val settingsResult: StateFlow<String?> = _settingsResult.asStateFlow()
 
@@ -60,7 +61,6 @@ class ChatViewModel(private val repository: MessageRepository) : ViewModel() {
                 }
             }
         }
-        // Обновляем бейдж когда меняются превью чатов
         viewModelScope.launch {
             repository.chatPreviews.collect {
                 _totalUnread.value = repository.totalUnread()
@@ -72,7 +72,7 @@ class ChatViewModel(private val repository: MessageRepository) : ViewModel() {
 
     fun openChat(chatId: String) {
         _currentChatId.value = chatId
-        repository.activeChatId = chatId   // сбрасывает счётчик непрочитанных
+        repository.activeChatId = chatId
         _totalUnread.value = repository.totalUnread()
         viewModelScope.launch {
             repository.messagesFor(chatId).collect { messages ->
@@ -101,10 +101,6 @@ class ChatViewModel(private val repository: MessageRepository) : ViewModel() {
 
     fun clearSendError() { _sendError.value = null }
 
-    // ── Непрочитанные ─────────────────────────────────────────────────────────
-    private val _totalUnread = MutableStateFlow(0)
-    val totalUnread: StateFlow<Int> = _totalUnread.asStateFlow()
-
     // ── LoRa настройки ────────────────────────────────────────────────────────
 
     fun applyLoraSettings(
@@ -117,7 +113,6 @@ class ChatViewModel(private val repository: MessageRepository) : ViewModel() {
             presetValue = preset.protoValue,
             overrideFrequency = overrideFrequency
         )
-
         if (result.isSuccess) {
             _loraSettings.value = LoraSettings(
                 usePreset = usePreset,
